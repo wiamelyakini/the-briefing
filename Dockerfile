@@ -11,7 +11,8 @@ COPY public/ ./public/
 COPY src/ ./src/
 
 # Run as non-root user to reduce blast radius of any compromise
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
+    && chown -R appuser:appgroup /app
 USER appuser
 
 EXPOSE 3000
