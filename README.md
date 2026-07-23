@@ -21,7 +21,7 @@ The deploy path runs left to right: a `git push` triggers Jenkins via webhook �
 - **EKS over a self-managed cluster** — managed control plane eliminates etcd maintenance and node certificate rotation, at the cost of ~$70/month for the cluster endpoint.
 - **Jenkins over GitHub Actions** — chosen to demonstrate self-hosted CI administration: plugin management, agent configuration, credential scoping — skills that don't appear in a hosted-runner setup.
 - **Two replicas minimum** — a single pod means a rolling update causes brief downtime. Two replicas allow zero-downtime deploys with the default `RollingUpdate` strategy.
-- **Terraform for the monitoring server only** — the EKS cluster is provisioned separately to keep the focus on pipeline skills. Full cluster IaC is the first item on the roadmap.
+- **Terraform for infrastructure as code** — the EKS cluster and monitoring server are provisioned via Terraform, keeping infrastructure reproducible and version-controlled alongside the application.
 
 ## Design decisions
 
@@ -30,7 +30,7 @@ The deploy path runs left to right: a `git push` triggers Jenkins via webhook �
 | Container orchestration | Amazon EKS | ECS, Nomad | Kubernetes is the industry standard; EKS removes control-plane overhead |
 | CI runner | Jenkins (self-hosted) | GitHub Actions | Demonstrates agent config, plugin management, credential scoping |
 | Image registry | Docker Hub | ECR, GHCR | Public visibility for portfolio; ECR would be preferable in production |
-| IaC scope | Terraform (monitoring server) | Full Terraform for EKS | Kept scope focused on pipeline skills |
+| IaC tool | Terraform | CloudFormation, CDK | Declarative HCL, wide ecosystem support, version-controlled infrastructure |
 | SAST | SonarQube + Quality Gate | ESLint only | Quality Gate creates a hard pipeline failure, not just a warning |
 | Secret storage | Jenkins Credentials Store | `.env` in repo | Credentials never touch the source tree |
 
@@ -147,9 +147,9 @@ USER appuser
 
 **Symptom:** SonarQube flagged `Terraform/main.tf` with: *"Omitting 'associate_public_ip_address' allows network access from the Internet."* (rule terraform:S6329, severity Minor).
 
-**Impact:** The monitoring server EC2 instance could receive inbound internet traffic depending on the VPC subnet configuration. Without explicitly setting `associate_public_ip_address = false`, the behavior depends on the subnet's default setting — which is not guaranteed.
+**Impact:** The EC2 instance could receive inbound internet traffic depending on the VPC subnet configuration. Without explicitly setting `associate_public_ip_address = false`, the behavior depends on the subnet's default setting — which is not guaranteed.
 
-**Root cause:** The Terraform resource block for the monitoring server did not include an `associate_public_ip_address` attribute, leaving the decision to the subnet default rather than declaring it explicitly in code.
+**Root cause:** The Terraform resource block for the EC2 instance did not include an `associate_public_ip_address` attribute, leaving the decision to the subnet default rather than declaring it explicitly in code.
 
 **Fix (pending):** Add `associate_public_ip_address = false` to the `aws_instance` resource and control inbound access exclusively through the security group rules.
 
@@ -173,7 +173,6 @@ USER appuser
 
 ## Trade-offs and known limitations
 
-- **EKS not provisioned by Terraform.** The monitoring server is; the cluster is not. First roadmap item.
 - **No HPA.** Fixed at 2 replicas. A real workload needs Horizontal Pod Autoscaler backed by a metrics-server.
 - **Docker Hub instead of ECR.** Fine for portfolio visibility; a production setup uses a private registry with image signing.
 - **Jenkins on a single EC2 instance.** No HA for the CI server itself.
@@ -207,8 +206,8 @@ K8S/
   Jenkinsfile            # Kubernetes deployment pipeline
   manifest.yml           # Deployment (2 replicas) + LoadBalancer service
 Terraform/
-  jenkinsfile            # Monitoring server provisioning pipeline
-  main.tf                # EC2 instance for Prometheus + Grafana
+  jenkinsfile            # Infrastructure provisioning pipeline
+  main.tf                # EKS cluster + EC2 instance for Prometheus + Grafana
 scripts/                 # Tool installation scripts (Trivy, kubectl, etc.)
 ```
 
@@ -216,7 +215,6 @@ scripts/                 # Tool installation scripts (Trivy, kubectl, etc.)
 
 - [ ] **Add non-root user to Dockerfile** — remediate the open SonarQube security hotspot
 - [ ] **Explicit `associate_public_ip_address` in Terraform** — close the EC2 exposure hotspot
-- [ ] **Terraform the EKS cluster** — largest current gap between demo and production-grade IaC
 - [ ] **Add HPA** — requires metrics-server; straightforward once cluster provisioning is stable
 - [ ] **Private image registry (ECR)** — remove the public Docker Hub dependency
 - [ ] **Staging environment** — deploy to a second namespace before promoting to production
