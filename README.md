@@ -173,11 +173,8 @@ USER appuser
 
 ## Trade-offs and known limitations
 
-- **No HPA.** Fixed at 2 replicas. A real workload needs Horizontal Pod Autoscaler backed by a metrics-server.
 - **Docker Hub instead of ECR.** Fine for portfolio visibility; a production setup uses a private registry with image signing.
 - **Jenkins on a single EC2 instance.** No HA for the CI server itself.
-- **No staging environment.** Code goes directly to the only cluster. A production setup would require a staging namespace and a manual promotion gate.
-- **3 open security hotspots.** Dockerfile (root user, recursive COPY) and Terraform (public IP exposure) — acknowledged, not yet remediated.
 
 ## Local development
 
@@ -201,10 +198,11 @@ docker run -p 3000:3000 the-briefing
 
 ```
 Jenkinsfile              # Main CI/CD pipeline (build → scan → push → deploy)
-Dockerfile               # React production build
+Dockerfile               # React production build (non-root user, explicit COPY)
 K8S/
-  Jenkinsfile            # Kubernetes deployment pipeline
-  manifest.yml           # Deployment (2 replicas) + LoadBalancer service
+  manifest.yml           # Production deployment (2–6 replicas) + LoadBalancer service
+  staging.yml            # Staging deployment (1 replica, namespace: staging)
+  hpa.yml                # HorizontalPodAutoscaler (min 2, max 6, 60% CPU threshold)
 Terraform/
   jenkinsfile            # Infrastructure provisioning pipeline
   main.tf                # EKS cluster + EC2 instance for Prometheus + Grafana
@@ -213,11 +211,11 @@ scripts/                 # Tool installation scripts (Trivy, kubectl, etc.)
 
 ## Roadmap
 
-- [ ] **Add non-root user to Dockerfile** — remediate the open SonarQube security hotspot
-- [ ] **Explicit `associate_public_ip_address` in Terraform** — close the EC2 exposure hotspot
-- [ ] **Add HPA** — requires metrics-server; straightforward once cluster provisioning is stable
+- [x] **Add non-root user to Dockerfile** — remediated, verified with `docker run whoami`
+- [x] **Explicit `associate_public_ip_address` in Terraform** — closed the EC2 exposure hotspot
+- [x] **Add HPA** — deployed and tested; auto-scaled from 2 to 6 replicas under load
+- [x] **Staging environment** — staging namespace with manual promotion gate before production
 - [ ] **Private image registry (ECR)** — remove the public Docker Hub dependency
-- [ ] **Staging environment** — deploy to a second namespace before promoting to production
 - [ ] **Alertmanager rules** — turn Blackbox probe failures into real alerts, not just dashboard signals
 
 ## Author
