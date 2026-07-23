@@ -2,15 +2,15 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: production
+  name: staging
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: the-briefing-deployment
-  namespace: production
+  namespace: staging
 spec:
-  replicas: 2
+  replicas: 1
   strategy:
     type: RollingUpdate
   selector:
@@ -31,7 +31,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: the-briefing-service
-  namespace: production
+  namespace: staging
 spec:
   type: LoadBalancer
   selector:

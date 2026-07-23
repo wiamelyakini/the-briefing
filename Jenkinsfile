@@ -65,9 +65,21 @@ pipeline{
                 sh "trivy image wiameelyakini/the-briefing:latest > trivyimage.txt" 
             }
         }
-        stage('Deploy to container'){
-            steps{
-                sh 'docker run -d --name the-briefing -p 3000:3000 wiameelyakini/the-briefing:latest'
+        stage('Deploy to Staging') {
+            steps {
+                sh 'kubectl apply -f K8S/staging.yml'
+                sh 'kubectl rollout status deployment/the-briefing-deployment -n staging'
+            }
+        }
+        stage('Approve Production Deploy') {
+            steps {
+                input message: 'Staging looks good — promote to production?', ok: 'Deploy to Production'
+            }
+        }
+        stage('Deploy to Production') {
+            steps {
+                sh 'kubectl apply -f K8S/manifest.yml'
+                sh 'kubectl rollout status deployment/the-briefing-deployment -n production'
             }
         }
 
