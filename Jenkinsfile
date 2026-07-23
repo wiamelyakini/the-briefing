@@ -15,7 +15,7 @@ pipeline{
         }
         stage('Checkout from Git'){
             steps{
-                git branch: 'main', credentialsId: 'github-token', url: 'https://github.com/wiameelyakini/the-briefing.git'
+                git branch: 'main', url: 'https://github.com/wiamelyakini/the-briefing.git'
             }
         }
         stage("Sonarqube Analysis "){
