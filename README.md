@@ -6,9 +6,9 @@
 
 ## Overview
 
-The goal was to build a complete CI/CD platform around a simple React application, treating the infrastructure as the actual deliverable. The interesting constraint: every stage — code quality, security, packaging, deployment, and observability — had to be fully automated, reproducible, and documented as code. The result is a pipeline that enforces quality gates and security scans before any artifact reaches the cluster, with monitoring in place from day one.
+The goal was to build a complete CI/CD platform around a simple React application, treating the infrastructure as the actual deliverable. Every stage — code quality, security scanning, packaging, deployment, and observability — is automated, reproducible, and declared as code. The pipeline enforces hard quality and security gates before any artifact reaches the cluster, with monitoring active from the first deployment.
 
-The app itself ([The Briefing](https://github.com/wiamelyakini/the-briefing)) is a tech news reader built on the public Hacker News API. It is intentionally simple — the complexity lives in the infrastructure around it.
+The application is a minimal tech news reader built on the public Hacker News API. It is intentionally simple — the complexity lives in the infrastructure around it.
 
 ## Architecture
 
@@ -18,70 +18,80 @@ The deploy path runs left to right: a `git push` triggers Jenkins via webhook �
 
 **Key decisions behind the diagram:**
 
-- **EKS over a self-managed cluster** — managed control plane eliminates etcd maintenance and node certificate rotation at the cost of roughly $70/month for the cluster endpoint. Acceptable for a portfolio project; reconsidered at scale.
-- **Jenkins over GitHub Actions** — chosen to demonstrate self-hosted CI administration (plugin management, agent configuration, credential scoping), skills that don't appear in a hosted-runner setup.
+- **EKS over a self-managed cluster** — managed control plane eliminates etcd maintenance and node certificate rotation, at the cost of ~$70/month for the cluster endpoint.
+- **Jenkins over GitHub Actions** — chosen to demonstrate self-hosted CI administration: plugin management, agent configuration, credential scoping — skills that don't appear in a hosted-runner setup.
 - **Two replicas minimum** — a single pod means a rolling update causes brief downtime. Two replicas allow zero-downtime deploys with the default `RollingUpdate` strategy.
-- **Terraform for the monitoring server only** — the EKS cluster itself is provisioned manually to keep the scope of this project focused on the pipeline, not cloud account management. Noted as a gap below.
+- **Terraform for the monitoring server only** — the EKS cluster is provisioned separately to keep the focus on pipeline skills. Full cluster IaC is the first item on the roadmap.
 
 ## Design decisions
 
 | Decision | Chosen | Rejected | Reason |
 |---|---|---|---|
 | Container orchestration | Amazon EKS | ECS, Nomad | Kubernetes is the industry standard; EKS removes control-plane overhead |
-| CI runner | Jenkins (self-hosted) | GitHub Actions | Demonstrates agent config, plugin ecosystem, credential management |
+| CI runner | Jenkins (self-hosted) | GitHub Actions | Demonstrates agent config, plugin management, credential scoping |
 | Image registry | Docker Hub | ECR, GHCR | Public visibility for portfolio; ECR would be preferable in production |
-| IaC scope | Terraform (monitoring server) | Full Terraform for EKS | Kept scope focused on pipeline skills, not cloud provisioning |
+| IaC scope | Terraform (monitoring server) | Full Terraform for EKS | Kept scope focused on pipeline skills |
 | SAST | SonarQube + Quality Gate | ESLint only | Quality Gate creates a hard pipeline failure, not just a warning |
 | Secret storage | Jenkins Credentials Store | `.env` in repo | Credentials never touch the source tree |
 
 ## System properties
 
-- **Availability target:** no formal SLA (not production-critical). Two replicas + `RollingUpdate` prevent deploy-time downtime.
-- **Scaling:** fixed at 2 replicas. HPA not configured — traffic is negligible, and adding it would require a metrics-server installation on the cluster.
-- **Recovery:** no formal RTO/RPO. If a pod crashes, the ReplicaSet controller restarts it automatically (self-healing). If the node fails, EKS reschedules pods on available nodes.
-- **Cost (approximate):** EKS cluster ~$70/month, EC2 worker nodes ~$30-60/month depending on instance type, monitoring EC2 instance ~$10-15/month. Total: ~$110-145/month if left running. In practice, torn down between sessions.
+- **Availability target:** no formal SLA. Two replicas + `RollingUpdate` prevent deploy-time downtime.
+- **Scaling:** fixed at 2 replicas. HPA not configured — traffic is negligible at this scale.
+- **Recovery:** no formal RTO/RPO. Pod crashes are handled automatically by the ReplicaSet controller. Node failure triggers EKS rescheduling.
+- **Cost (approximate):** EKS cluster ~$70/month, EC2 worker nodes ~$30–60/month, monitoring EC2 ~$10–15/month. Total: ~$110–145/month if left running continuously.
 
 ## Security posture
 
 **Secrets management**
-Jenkins Credentials Store holds Docker Hub credentials and the kubeconfig. Nothing is in the repository. No `.env` file, no hardcoded tokens.
+Jenkins Credentials Store holds Docker Hub credentials and the kubeconfig. Nothing sensitive is in the repository. No `.env` file, no hardcoded tokens.
 
 **Scan coverage**
 
 | Scanner | What it checks | Where in pipeline |
 |---|---|---|
-| SonarQube | Code smells, duplications, coverage, security hotspots | Stage 2 — blocks on Quality Gate failure |
-| OWASP Dependency Check | Known CVEs in npm dependencies | Stage 3 — blocks on critical finding |
-| Trivy (filesystem) | Vulnerabilities in source + lockfile | Stage 3 — runs alongside OWASP |
-| Trivy (image) | Vulnerabilities in the built Docker image | Stage 4 — after build, before push |
+| SonarQube | Code smells, duplications, security hotspots | Stage 4 — blocks on Quality Gate failure |
+| OWASP Dependency Check | Known CVEs in npm dependencies | Stage 7 — blocks on critical finding |
+| Trivy (filesystem) | Vulnerabilities in source + lockfile | Stage 8 — runs after OWASP |
+| Trivy (image) | Vulnerabilities in the built Docker image | Stage 10 — after build, before deploy |
 
 **IAM / least privilege**
-The EKS node role has the minimum AWS-managed policies required (`AmazonEKSWorkerNodePolicy`, `AmazonEC2ContainerRegistryReadOnly`). No admin roles attached to nodes.
+EKS node role uses the minimum AWS-managed policies required (`AmazonEKSWorkerNodePolicy`, `AmazonEC2ContainerRegistryReadOnly`). No admin roles attached to nodes.
 
 **Known gaps**
-- No network policies between pods (all pods can talk to each other within the cluster)
-- No pod security standards enforced (no `PodSecurityAdmission` configuration)
-- Docker Hub is public — the image is readable by anyone
+- No Kubernetes network policies — all pods can communicate within the cluster
+- No pod security standards enforced
+- Docker Hub image is public
 - No TLS on the LoadBalancer endpoint (HTTP only)
-- Terraform state is local, not remote (S3 + DynamoDB locking not configured)
+- Terraform state is local, not remote (no S3 + DynamoDB locking)
+- 3 SonarQube security hotspots pending review (Dockerfile + Terraform — see Incidents)
 
 ## Pipeline
 
-| Stage | Tool | Fails the build if... |
-|---|---|---|
-| Checkout | Jenkins / Git | Repository unreachable |
-| Code quality | SonarQube | Quality Gate status is not `OK` |
-| Dependency scan | OWASP Dependency Check | Critical CVE found in npm dependencies |
-| Filesystem scan | Trivy | High or critical vulnerability in source |
-| Docker build | Docker | Build error (missing dep, syntax error in Dockerfile) |
-| Image scan | Trivy | High or critical vulnerability in the built image |
-| Push | Docker Hub | Auth failure or network error |
-| Deploy | Jenkins → `kubectl apply` | `kubectl` returns non-zero exit code |
-| Notify | Jenkins Email Extension | Always runs — sends success or failure |
+![Pipeline Stage View](docs/jenkins-pipeline.png)
 
-Stages run sequentially. A failure at any gate stops the pipeline immediately; the image is never pushed if a scan fails.
+| Stage | Tool | Duration (avg) | Fails the build if... |
+|---|---|---|---|
+| Tool Install | Jenkins | 163ms | Plugin or binary missing |
+| Clean workspace | Jenkins | 287ms | Disk full |
+| Checkout from Git | Git | 4s | Repository unreachable |
+| SonarQube Analysis | SonarQube | 19s | Analysis errors |
+| Quality Gate | SonarQube | 357ms | Gate status is not `OK` |
+| Install Dependencies | npm | 15s | `npm install` fails |
+| OWASP FS Scan | OWASP Dependency Check | 3min 4s | Critical CVE in dependencies |
+| Trivy FS Scan | Trivy | 3s | High/critical vulnerability in source |
+| Docker Build & Push | Docker | 2min 30s | Build error or auth failure |
+| Trivy Image Scan | Trivy | 20s | High/critical vuln in image |
+
+Total pipeline duration: ~6 min 44s. OWASP and Docker Build account for ~85% of that time.
+
+On success, Jenkins emails a build report with the Trivy scan output (`trivyfs.txt`, `trivyimage.txt`) attached.
+
+![Build success](docs/jenkins-build-success.png)
 
 ## Observability
+
+![SonarQube Quality Gate](docs/sonarqube-quality-gate.png)
 
 **What is monitored**
 
@@ -90,56 +100,85 @@ Stages run sequentially. A failure at any gate stops the pipeline immediately; t
 | Pod CPU and memory | Prometheus + node-exporter | Primary indicator of resource pressure before OOM kill |
 | HTTP endpoint availability | Blackbox Exporter | Detects service-level failure that pod health alone misses |
 | HTTP response time | Blackbox Exporter | Catches degraded performance before it becomes an outage |
-| Pipeline build result | Jenkins + Email | Immediate feedback loop on every push |
+| Code quality gate | SonarQube | Enforces 0 new bugs, 0 new vulnerabilities on every push |
+| Pipeline result | Jenkins Email Extension | Immediate feedback loop on every push |
 
-Grafana is configured with dashboards covering pod resource usage and endpoint probe results. There are no PagerDuty-style alerts — this is a portfolio project, so dashboards are a visual signal only.
+**SonarQube results on latest analysis**
+
+| Metric | Result |
+|---|---|
+| Quality Gate | Passed — all conditions met |
+| New Bugs | 0 |
+| New Vulnerabilities | 0 |
+| New Security Hotspots | 0 |
+| New Code Smells | 0 |
+| Added Technical Debt | 0 |
+
+3 security hotspots remain open on the overall codebase (not new code) — see Incidents below.
 
 **Alerting philosophy**
-Nothing pages anyone. The email notification from Jenkins on build failure is the only active alert. A production setup would add Alertmanager rules on probe failure (i.e., the public URL stops responding).
+The Jenkins email notification on build failure is the only active alert. A production setup would add Alertmanager rules on probe failure (public URL stops responding for >2 consecutive checks).
 
-## Incidents / what broke
+## Incidents
 
-### Hook typo broke React's rules of hooks
+### Dockerfile flagged for running container as root
 
-**Symptom:** `npm start` threw an ESLint error — `React Hook useState is called in function usStory that is neither a React function component nor a custom React Hook function`.
+![Security hotspot — root user](docs/sonarqube-hotspot-root.png)
 
-**Root cause:** A custom hook was named `usStory` instead of `useStory`. React's rules of hooks require the `use` prefix — without it, the linter (and at runtime, React itself) cannot identify it as a hook and rejects the `useState` call inside it.
+**Symptom:** SonarQube Security Hotspots flagged the Dockerfile with: *"The node image runs with root as the default user. Make sure it is safe here."* The finding appeared on `FROM node:alpine` at line 2.
 
-**Fix:** Renamed the function to `useStory` and updated both call sites.
+**Impact:** The container runs all processes as root inside the pod. If a dependency vulnerability were exploited, the attacker would have root access within the container — increasing the blast radius of any compromise.
 
-**Prevention:** ESLint with `eslint-plugin-react-hooks` now catches this at lint time before it reaches the browser.
+**Root cause:** `node:alpine` does not define a non-root user by default. The Dockerfile inherited this without adding a `USER` directive.
 
----
+**Fix (pending):** Add a dedicated non-root user to the Dockerfile:
+```dockerfile
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+```
 
-### Git history contained traces of the original repository
-
-**Symptom:** After replacing all source files, `git log` still showed commit messages referencing the original project name. GitHub's contributor graph also showed a contributor that should not appear.
-
-**Root cause:** Git history is immutable by default — replacing files does not rewrite past commits. The original author's commits were still present in the DAG.
-
-**Fix:** Created an orphan branch (`git checkout --orphan`), staged all current files as a single commit under the correct author identity, then force-pushed to `main`. This replaces the entire history with one clean commit.
-
-**Prevention:** For any future project built on a fork or clone, history rewrite is now step zero before any work begins.
+**Current status:** The hotspot is marked *to review* in SonarQube. The Quality Gate passed because this is a hotspot (requires human review) rather than a vulnerability (auto-fails). Remediation is on the roadmap.
 
 ---
 
-### `git push` rejected after history rewrite on local machine
+### Terraform EC2 instance exposed without explicit public IP control
 
-**Symptom:** After cloning the cleaned repository locally and pulling, Git refused with "refusing to merge unrelated histories", then after attempting a rebase, push was rejected as non-fast-forward.
+![Security hotspot — Terraform](docs/sonarqube-hotspot-terraform.png)
 
-**Root cause:** The local clone's `main` branch still pointed to the old history. After a force-push to the remote, the local and remote histories diverged completely. `git pull` without `--allow-unrelated-histories` fails; and after rebase, push still requires `--force` because the remote tip changed.
+**Symptom:** SonarQube flagged `Terraform/main.tf` with: *"Omitting 'associate_public_ip_address' allows network access from the Internet."* (rule terraform:S6329, severity Minor).
 
-**Fix:** Re-cloned fresh from the remote, which gave a clean working copy with no local history conflicts.
+**Impact:** The monitoring server EC2 instance could receive inbound internet traffic depending on the VPC subnet configuration. Without explicitly setting `associate_public_ip_address = false`, the behavior depends on the subnet's default setting — which is not guaranteed.
 
-**Prevention:** After any force-push that rewrites history, the correct recovery on other machines is always a fresh clone, not a pull.
+**Root cause:** The Terraform resource block for the monitoring server did not include an `associate_public_ip_address` attribute, leaving the decision to the subnet default rather than declaring it explicitly in code.
+
+**Fix (pending):** Add `associate_public_ip_address = false` to the `aws_instance` resource and control inbound access exclusively through the security group rules.
+
+**Current status:** Open hotspot. The instance currently sits behind a security group that limits inbound ports, but the underlying configuration is not explicit enough to be considered hardened.
+
+---
+
+### SonarQube analysis warning on Node.js version
+
+![Node.js version warning](docs/sonarqube-nodejs-warning.png)
+
+**Symptom:** Every SonarQube analysis run produced a warning in the Activity log: *"Node.js version 17 is not recommended, you might experience issues. Please use a recommended version of Node.js [16, 18]."*
+
+**Impact:** No build failures — the warning did not affect the Quality Gate result. However, analysis results for certain JavaScript rules may be incomplete or inaccurate when run against an unsupported Node.js version. The warning appeared on every pipeline run, making it easy to ignore other warnings.
+
+**Root cause:** The Jenkins agent had Node.js 17 installed via the `nodejs` tool configuration. SonarQube's JS/TS analysis engine only officially supports Node.js 16 and 18 LTS versions.
+
+**Fix:** Updated the Jenkins Global Tool Configuration to pin the Node.js installation to version 18 LTS. Subsequent pipeline runs completed without the warning.
+
+**Prevention:** Node.js version is now pinned explicitly in the Jenkins tool configuration rather than using a floating `latest` install.
 
 ## Trade-offs and known limitations
 
-- **EKS not provisioned by Terraform.** The monitoring server is, the cluster is not. With more time: full cluster provisioning in Terraform including VPC, subnets, node groups, and IAM roles.
-- **No HPA.** The app scales fine at 2 replicas for demo traffic. A real workload needs Horizontal Pod Autoscaler backed by a metrics-server.
-- **Docker Hub instead of ECR.** Public registry is fine for a portfolio project but a production deployment would use a private registry with image signing.
-- **Jenkins on a single EC2 instance.** No HA for the CI server itself. If that instance goes down, the pipeline is unavailable.
-- **No staging environment.** Code goes from the pipeline directly to the only cluster. A production setup would deploy to staging first and require a manual promotion gate.
+- **EKS not provisioned by Terraform.** The monitoring server is; the cluster is not. First roadmap item.
+- **No HPA.** Fixed at 2 replicas. A real workload needs Horizontal Pod Autoscaler backed by a metrics-server.
+- **Docker Hub instead of ECR.** Fine for portfolio visibility; a production setup uses a private registry with image signing.
+- **Jenkins on a single EC2 instance.** No HA for the CI server itself.
+- **No staging environment.** Code goes directly to the only cluster. A production setup would require a staging namespace and a manual promotion gate.
+- **3 open security hotspots.** Dockerfile (root user, recursive COPY) and Terraform (public IP exposure) — acknowledged, not yet remediated.
 
 ## Local development
 
@@ -151,11 +190,10 @@ npm start
 # Opens at http://localhost:3000
 ```
 
-No API key required — the app uses the public [Hacker News Firebase API](https://github.com/HackerNews/API).
-
-To build the Docker image locally:
+No API key required — uses the public [Hacker News Firebase API](https://github.com/HackerNews/API).
 
 ```bash
+# Docker
 docker build -t the-briefing .
 docker run -p 3000:3000 the-briefing
 ```
@@ -164,24 +202,25 @@ docker run -p 3000:3000 the-briefing
 
 ```
 Jenkinsfile              # Main CI/CD pipeline (build → scan → push → deploy)
-Dockerfile               # Multi-stage React build
+Dockerfile               # React production build
 K8S/
-  Jenkinsfile            # Kubernetes-specific pipeline variant
+  Jenkinsfile            # Kubernetes deployment pipeline
   manifest.yml           # Deployment (2 replicas) + LoadBalancer service
 Terraform/
-  jenkinsfile            # Pipeline for provisioning the monitoring server
+  jenkinsfile            # Monitoring server provisioning pipeline
   main.tf                # EC2 instance for Prometheus + Grafana
 scripts/                 # Tool installation scripts (Trivy, kubectl, etc.)
 ```
 
 ## Roadmap
 
-- [ ] **Terraform the EKS cluster** — highest priority; currently the biggest gap between "demo" and "production-grade IaC"
-- [ ] **Add HPA** — requires metrics-server on the cluster; straightforward once the cluster is stable
+- [ ] **Add non-root user to Dockerfile** — remediate the open SonarQube security hotspot
+- [ ] **Explicit `associate_public_ip_address` in Terraform** — close the EC2 exposure hotspot
+- [ ] **Terraform the EKS cluster** — largest current gap between demo and production-grade IaC
+- [ ] **Add HPA** — requires metrics-server; straightforward once cluster provisioning is stable
 - [ ] **Private image registry (ECR)** — remove the public Docker Hub dependency
 - [ ] **Staging environment** — deploy to a second namespace before promoting to production
-- [ ] **Alertmanager rules** — turn Blackbox probe failures into actual alerts, not just dashboard signals
-- [ ] **Network policies** — restrict pod-to-pod traffic to only what is necessary
+- [ ] **Alertmanager rules** — turn Blackbox probe failures into real alerts, not just dashboard signals
 
 ## Author
 
