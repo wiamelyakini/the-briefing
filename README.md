@@ -64,7 +64,6 @@ EKS node role uses the minimum AWS-managed policies required (`AmazonEKSWorkerNo
 - Docker Hub image is public
 - No TLS on the LoadBalancer endpoint (HTTP only)
 - Terraform state is local, not remote (no S3 + DynamoDB locking)
-- 3 SonarQube security hotspots pending review (Dockerfile + Terraform — see Incidents)
 
 ## Pipeline
 
@@ -114,62 +113,34 @@ On success, Jenkins emails a build report with the Trivy scan output (`trivyfs.t
 | New Code Smells | 0 |
 | Added Technical Debt | 0 |
 
-3 security hotspots remain open on the overall codebase (not new code) — see Incidents below.
-
 **Alerting philosophy**
 The Jenkins email notification on build failure is the only active alert. A production setup would add Alertmanager rules on probe failure (public URL stops responding for >2 consecutive checks).
 
 ## Incidents
 
-### Dockerfile flagged for running container as root
+### Container running as root
 
-![Security hotspot — root user](docs/sonarqube-hotspot-root.png)
+SonarQube flagged the Dockerfile — `node:alpine` runs as root by default, and I hadn't added a `USER` directive. It showed up as a security hotspot, not a build blocker, but still worth fixing.
 
-**Symptom:** SonarQube Security Hotspots flagged the Dockerfile with: *"The node image runs with root as the default user. Make sure it is safe here."* The finding appeared on `FROM node:alpine` at line 2.
+The risk: if a dependency gets exploited, the attacker lands inside the container as root. Added a dedicated non-root user and transferred ownership of the app directory before switching:
 
-**Impact:** The container runs all processes as root inside the pod. If a dependency vulnerability were exploited, the attacker would have root access within the container — increasing the blast radius of any compromise.
-
-**Root cause:** `node:alpine` does not define a non-root user by default. The Dockerfile inherited this without adding a `USER` directive.
-
-**Fix (pending):** Add a dedicated non-root user to the Dockerfile:
 ```dockerfile
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
+    && chown -R appuser:appgroup /app
 USER appuser
 ```
 
-**Current status:** The hotspot is marked *to review* in SonarQube. The Quality Gate passed because this is a hotspot (requires human review) rather than a vulnerability (auto-fails). Remediation is on the roadmap.
+Verified — container now runs as `appuser`.
 
 ---
 
-### Terraform EC2 instance exposed without explicit public IP control
+### Terraform EC2 — public IP left to subnet default
 
-![Security hotspot — Terraform](docs/sonarqube-hotspot-terraform.png)
+SonarQube caught that the EC2 resource block in `Terraform/main.tf` didn't explicitly set `associate_public_ip_address`. Depending on the subnet configuration, the instance could end up with a public IP without it being intentional.
 
-**Symptom:** SonarQube flagged `Terraform/main.tf` with: *"Omitting 'associate_public_ip_address' allows network access from the Internet."* (rule terraform:S6329, severity Minor).
-
-**Impact:** The EC2 instance could receive inbound internet traffic depending on the VPC subnet configuration. Without explicitly setting `associate_public_ip_address = false`, the behavior depends on the subnet's default setting — which is not guaranteed.
-
-**Root cause:** The Terraform resource block for the EC2 instance did not include an `associate_public_ip_address` attribute, leaving the decision to the subnet default rather than declaring it explicitly in code.
-
-**Fix (pending):** Add `associate_public_ip_address = false` to the `aws_instance` resource and control inbound access exclusively through the security group rules.
-
-**Current status:** Open hotspot. The instance currently sits behind a security group that limits inbound ports, but the underlying configuration is not explicit enough to be considered hardened.
+In practice it was behind a security group with restricted inbound ports, so not exposed — but relying on subnet defaults in infrastructure code is sloppy. Fixed by setting `associate_public_ip_address = false` explicitly in the resource block.
 
 ---
-
-### SonarQube analysis warning on Node.js version
-
-![Node.js version warning](docs/sonarqube-nodejs-warning.png)
-
-**Symptom:** Every SonarQube analysis run produced a warning in the Activity log: *"Node.js version 17 is not recommended, you might experience issues. Please use a recommended version of Node.js [16, 18]."*
-
-**Impact:** No build failures — the warning did not affect the Quality Gate result. However, analysis results for certain JavaScript rules may be incomplete or inaccurate when run against an unsupported Node.js version. The warning appeared on every pipeline run, making it easy to ignore other warnings.
-
-**Root cause:** The Jenkins agent had Node.js 17 installed via the `nodejs` tool configuration. SonarQube's JS/TS analysis engine only officially supports Node.js 16 and 18 LTS versions.
-
-**Fix:** Updated the Jenkins Global Tool Configuration to pin the Node.js installation to version 18 LTS. Subsequent pipeline runs completed without the warning.
-
-**Prevention:** Node.js version is now pinned explicitly in the Jenkins tool configuration rather than using a floating `latest` install.
 
 ## Trade-offs and known limitations
 
@@ -211,9 +182,9 @@ scripts/                 # Tool installation scripts (Trivy, kubectl, etc.)
 
 ## Roadmap
 
-- [x] **Add non-root user to Dockerfile** — remediated, verified with `docker run whoami`
-- [x] **Explicit `associate_public_ip_address` in Terraform** — closed the EC2 exposure hotspot
-- [x] **Add HPA** — deployed and tested; auto-scaled from 2 to 6 replicas under load
+- [x] **Non-root user in Dockerfile** — fixed, verified with `docker run whoami`
+- [x] **Explicit public IP control in Terraform** — closed the EC2 exposure hotspot
+- [x] **HPA** — deployed, auto-scaled from 2 to 6 replicas under load
 - [x] **Staging environment** — staging namespace with manual promotion gate before production
 - [ ] **Private image registry (ECR)** — remove the public Docker Hub dependency
 - [ ] **Alertmanager rules** — turn Blackbox probe failures into real alerts, not just dashboard signals
